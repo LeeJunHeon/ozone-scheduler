@@ -1,0 +1,49 @@
+# Local equipment settings and Google Chat webhook
+settings.json
+settings.*.json
+!settings.example.json
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.key
+*.pem
+
+# Runtime logs and Python generated files
+[Ll]ogs/
+*.log
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build outputs, editor settings, archives and backups
+build/
+dist/
+*.egg-info/
+.vscode/
+.idea/
+*.zip
+*.bak
+
+# Public repository: local data, recipes and deployment artifacts
+**/settings*.json
+**/secrets*.json
+*.local
+*.local.*
+*.csv
+*.db
+*.sqlite*
+*.dmp
+*.7z
+*.rar
+*.dll
+*.exe
+captures/
+screenshots/
