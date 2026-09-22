@@ -36,6 +36,7 @@ class SeqState(Enum):
     IDLE = "idle"
     ON_RUNNING = "on_running"
     ON_RECIPE_RUNNING = "on_recipe_running"
+    OFF_WAIT_IDLE = "off_wait_idle"
     OFF_PRE_RUNNING = "off_pre_running"
     OFF_POST_RUNNING = "off_post_running"
 
@@ -46,6 +47,9 @@ RECIPE_START_CONFIRM_TIMEOUT_SEC = 60
 RECIPE_POLL_TIMEOUT_SEC = 60 * 60 * 6
 RELAY_OFF_RETRY_COUNT = 3
 RELAY_OFF_RETRY_DELAY_SEC = 1.0
+OFF_IDLE_WAIT_TIMEOUT_SEC = 5 * 60
+OFF_IDLE_POLL_INTERVAL_SEC = 2
+
 
 logger = logging.getLogger(__name__)
 
@@ -55,9 +59,10 @@ class OzoneController(QObject):
     state_changed = pyqtSignal(str)         # SeqState.value
     relay_state_changed = pyqtSignal(bool)  # True=ON, False=OFF
 
-    def __init__(self, config: AppConfig):
+    def __init__(self, config: AppConfig, chat_notifier):
         super().__init__()
         self.config = config
+        self._chat_notifier = chat_notifier
 
         self._state = SeqState.IDLE
         self.relay_on = False
@@ -154,21 +159,28 @@ class OzoneController(QObject):
         return os.path.join(rdir, name + ".csv")
 
     def _notify_chat(self, text: str) -> None:
-        """Google Chat 웹훅으로 텍스트 전송. URL 없거나 실패해도 조용히 무시."""
         url = (self.config.chat_webhook_url or "").strip()
         if not url:
             return
-        try:
-            data = json.dumps({"text": text}, ensure_ascii=False).encode("utf-8")
-            req = _urlrequest.Request(
-                url,
-                data=data,
-                headers={"Content-Type": "application/json; charset=UTF-8"},
-                method="POST",
+
+        if not self._chat_notifier.enqueue(text):
+            self._emit_log(
+                "error",
+                "Google Chat 발송 큐 저장 실패",
             )
-            _urlrequest.urlopen(req, timeout=2.0)
-        except (URLError, OSError, ValueError) as e:
-            logger.warning("Google Chat 알림 전송 실패: %s", e)
+
+    def _emit_log(self, level: str, text: str) -> None:
+        log_level = {
+            "info": logging.INFO,
+            "warn": logging.WARNING,
+            "error": logging.ERROR,
+        }.get(level, logging.INFO)
+
+        # 파일 로그가 원본
+        logger.log(log_level, text)
+
+        # UI 표시는 부가 기능
+        self.log.emit(level, text)
 
     @staticmethod
     def _ald_status_reason(status: dict) -> str:
@@ -219,12 +231,60 @@ class OzoneController(QObject):
 
         if st == SeqState.IDLE:
             self._check_schedule()
+
+        elif st == SeqState.OFF_WAIT_IDLE:
+            self._tick_off_wait_idle()
+
         elif st == SeqState.ON_RECIPE_RUNNING:
             self._tick_on_recipe_running()
+
         elif st == SeqState.OFF_PRE_RUNNING:
             self._tick_off_pre_running()
+
         elif st == SeqState.OFF_POST_RUNNING:
             self._tick_off_post_running()
+
+    def _tick_off_wait_idle(self) -> None:
+        now = time.monotonic()
+
+        if now < self._next_off_status_poll_at:
+            return
+
+        self._next_off_status_poll_at = (
+            now + OFF_IDLE_POLL_INTERVAL_SEC
+        )
+
+        try:
+            status = self._ald().get_status()
+        except AldClientError as e:
+            self._emit_log(
+                "warn",
+                f"[자동 OFF] ALD 상태 조회 실패, 재시도 예정: {e}",
+            )
+            return
+
+        if status["alarm"] or status["state"] == "error":
+            self._force_relay_off(
+                "[자동 OFF]",
+                self._ald_status_reason(status),
+            )
+            return
+
+        if status["state"] == "idle":
+            self._emit_log(
+                "info",
+                "[자동 OFF] ALD idle 확인 → 자동 OFF 진행",
+            )
+            self._do_pre_off_recipe("[자동 OFF]")
+            return
+
+        elapsed = now - self._off_wait_started
+
+        if elapsed >= OFF_IDLE_WAIT_TIMEOUT_SEC:
+            self._force_relay_off(
+                "[자동 OFF]",
+                "ALD running 상태가 5분 이상 지속됨",
+            )
 
     # ============ 스케줄 체크 ============
 
@@ -279,16 +339,23 @@ class OzoneController(QObject):
     def manual_on(self) -> None:
         with self._lock:
             if self._state != SeqState.IDLE:
-                self.log.emit("warn", "다른 시퀀스 진행 중. 수동 ON 거부")
+                self._emit_log(
+                    "warn",
+                    "다른 시퀀스 진행 중. 수동 ON 거부",
+                )
                 return
 
-        self.log.emit("info", "[수동 ON] 요청 접수")
+            self._state = SeqState.ON_RUNNING
+
+        self.state_changed.emit(SeqState.ON_RUNNING.value)
+        self._current_is_auto = False
+        self._emit_log("info", "[수동 ON] 요청 접수")
+
         threading.Thread(
             target=self._manual_on_direct,
             name="ManualRelayOn",
             daemon=True,
         ).start()
-
 
     def manual_off(self) -> None:
         with self._lock:
@@ -313,7 +380,7 @@ class OzoneController(QObject):
             self._relay().on()
             self.relay_on = True
             self.relay_state_changed.emit(True)
-            self.log.emit("info", f"{tag} 릴레이 ON OK")
+            self._emit_log("info", f"{tag} 릴레이 ON OK")
         except RelayError as e:
             self.log.emit("error", f"{tag} 릴레이 ON 실패: {e}")
         finally:
@@ -361,7 +428,7 @@ class OzoneController(QObject):
             self._relay().on()
             self.relay_on = True
             self.relay_state_changed.emit(True)
-            self.log.emit("info", f"{tag} 릴레이 ON OK")
+            self._emit_log("info", f"{tag} 릴레이 ON OK")
         except RelayError as e:
             self.log.emit("error", f"{tag} 릴레이 ON 실패: {e}")
             self._notify_chat(f"{tag} 실패: 릴레이 ON 실패 ({e})")
@@ -409,6 +476,12 @@ class OzoneController(QObject):
     def _start_off_sequence(self) -> None:
         tag = "[자동 OFF]"
         self._current_is_auto = True
+
+        self._off_wait_started = time.monotonic()
+        self._next_off_status_poll_at = 0.0
+        self._set_state(SeqState.OFF_WAIT_IDLE)
+
+        self._tick_off_wait_idle()
 
         # 자동 OFF 시작 전 ALD 상태 확인
         try:

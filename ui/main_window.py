@@ -172,11 +172,10 @@ class MainWindow(QMainWindow):
         self._ald_status_result.connect(self._on_ald_status_result)
         self._recipe_scan_result.connect(self._on_recipe_scan_result)
 
-        # Rayvac 연결 테스트용 single-shot timer
-        # 지속 polling 용도가 아니라 host/port 변경 후 한 번만 실행하기 위한 timer
-        self._ald_test_timer = QTimer(self)
-        self._ald_test_timer.setSingleShot(True)
-        self._ald_test_timer.timeout.connect(self._test_ald_connection)
+        # ALD 상태를 주기적으로 갱신하는 타이머
+        self._ald_status_timer = QTimer(self)
+        self._ald_status_timer.setInterval(5000)
+        self._ald_status_timer.timeout.connect(self._test_ald_connection)
 
         # config 로딩 중에는 host/port 변경 이벤트로 테스트하지 않도록 사용
         self._loading_config = True
@@ -188,8 +187,9 @@ class MainWindow(QMainWindow):
         self.ald_pill.set("ALD: 확인 중", "neutral")
         self.alarm_pill.set("알람: 확인 중", "neutral")
 
-        # 프로그램 시작 후 Rayvac 연결 1회 확인
-        self._ald_test_timer.start(500)
+        # 시작 직후 한 번 확인하고 이후 5초마다 갱신
+        QTimer.singleShot(500, self._test_ald_connection)
+        self._ald_status_timer.start()
 
         # 시작 시 레시피 목록 1회 자동 갱신
         QTimer.singleShot(1500, self._refresh_recipes)
@@ -600,15 +600,15 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(str, str)
     def _on_log(self, level: str, text: str) -> None:
-        log_level = {
-            "info": logging.INFO,
-            "warn": logging.WARNING,
-            "error": logging.ERROR,
-        }.get(level, logging.INFO)
-        logger.log(log_level, text)
-
+        # 파일 기록은 controller에서 이미 완료됨.
+        # 여기서는 화면 출력만 처리한다.
         ts = datetime.now().strftime("%H:%M:%S")
-        color = {"info": "#222", "warn": "#a35900", "error": "#c5221f"}.get(level, "#222")
+        color = {
+            "info": "#222",
+            "warn": "#a35900",
+            "error": "#c5221f",
+        }.get(level, "#222")
+
         self.log_view.append(
             f'<span style="color:#888">{ts}</span> '
             f'<span style="color:{color}">{text}</span>'

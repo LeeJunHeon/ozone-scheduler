@@ -16,8 +16,17 @@ from logging import Handler, LogRecord
 from typing import Optional, TextIO
 
 
-APP_ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-LOG_DIR = os.path.join(APP_ROOT, "Logs")
+LOCAL_APP_DATA = os.environ.get(
+    "LOCALAPPDATA",
+    os.path.expanduser("~"),
+)
+
+LOG_DIR = os.path.join(
+    LOCAL_APP_DATA,
+    "VanaM",
+    "OzoneScheduler",
+    "Logs",
+)
 
 
 class DailyFileHandler(Handler):

@@ -42,6 +42,13 @@ class AppConfig:
     # Google Chat 웹훅 URL (비어있으면 알림 안 보냄)
     chat_webhook_url: str = ""
 
+    nas_log_enabled: bool = True
+    nas_log_dir: str = (
+        r"\\VanaM_NAS\VanaM_toShare\JH_Lee\Logs\ozone"
+    )
+    nas_log_sync_interval_sec: int = 30
+    local_log_retention_days: int = 14
+
     @classmethod
     def load(cls) -> "AppConfig":
         if not os.path.exists(CONFIG_PATH):
