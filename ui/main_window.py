@@ -58,7 +58,6 @@ class StatusPill(QLabel):
         super().__init__(text, parent)
         self.setMinimumHeight(22)
         self._set_style(kind)
-        self._last_logged_ald_status: tuple | None = None
 
     def _set_style(self, kind: str) -> None:
         # kind: 'neutral' | 'success' | 'warn' | 'error'
@@ -168,6 +167,7 @@ class MainWindow(QMainWindow):
         self._recipe_scan_in_progress = False
         self._recipe_scan_started_at = 0.0
         self._recipe_scan_id = 0
+        self._last_logged_ald_status: tuple | None = None
 
         # 내부 signal 연결
         self._ald_status_result.connect(self._on_ald_status_result)

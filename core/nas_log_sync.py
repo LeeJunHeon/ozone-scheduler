@@ -105,15 +105,19 @@ class NasLogSyncWorker:
         local_snapshot = temp_dir / (
             f"{source.name}.{socket.gethostname()}.snapshot"
         )
-        shutil.copy2(source, local_snapshot)
 
-        # NAS에는 임시 이름으로 전송한 뒤 교체한다.
         nas_temp = destination.with_suffix(
             destination.suffix + ".uploading"
         )
+
         try:
+            # 로컬 원본 스냅샷 생성
             shutil.copy2(source, local_snapshot)
+
+            # 스냅샷을 NAS 임시 파일로 전송
             shutil.copy2(local_snapshot, nas_temp)
+
+            # 전송이 완료된 파일만 최종 이름으로 교체
             os.replace(nas_temp, destination)
 
         finally:
