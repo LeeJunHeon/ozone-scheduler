@@ -26,6 +26,11 @@ class NasLogSyncWorker:
         self._thread: threading.Thread | None = None
         self._last_error: str | None = None
 
+        # 파일별 마지막 NAS 동기화 상태
+        # key: 로컬 파일 경로
+        # value: (마지막 수정 시각 ns, 파일 크기)
+        self._synced_signatures: dict[str, tuple[int, int]] = {}
+
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
@@ -106,10 +111,13 @@ class NasLogSyncWorker:
         nas_temp = destination.with_suffix(
             destination.suffix + ".uploading"
         )
-        shutil.copy2(local_snapshot, nas_temp)
-        os.replace(nas_temp, destination)
-
         try:
-            local_snapshot.unlink()
-        except OSError:
-            pass
+            shutil.copy2(source, local_snapshot)
+            shutil.copy2(local_snapshot, nas_temp)
+            os.replace(nas_temp, destination)
+
+        finally:
+            try:
+                local_snapshot.unlink()
+            except OSError:
+                pass

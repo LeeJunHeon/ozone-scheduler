@@ -177,11 +177,11 @@ class OzoneController(QObject):
             "error": logging.ERROR,
         }.get(level, logging.INFO)
 
-        # 파일 로그가 원본
+        # 로컬 파일 로그에 먼저 기록
         logger.log(log_level, text)
 
-        # UI 표시는 부가 기능
-        self._emit_log(level, text)
+        # Qt signal을 통해 UI 최근 동작 창에 표시
+        self.log.emit(level, text)
 
     @staticmethod
     def _ald_status_reason(status: dict) -> str:
@@ -258,6 +258,7 @@ class OzoneController(QObject):
 
         try:
             status = self._ald().get_status()
+
         except AldClientError as e:
             self._emit_log(
                 "warn",
@@ -269,6 +270,33 @@ class OzoneController(QObject):
                     "[자동 OFF]",
                     "ALD 상태를 5분 동안 확인하지 못함",
                 )
+            return
+
+        state = status["state"]
+
+        # ALD alarm 또는 error 상태
+        if status["alarm"] or state == "error":
+            self._force_relay_off(
+                "[자동 OFF]",
+                self._ald_status_reason(status),
+            )
+            return
+
+        # 정상적으로 idle 복귀
+        if state == "idle":
+            self._emit_log(
+                "info",
+                "[자동 OFF] ALD idle 확인 → 자동 OFF 진행",
+            )
+            self._do_pre_off_recipe("[자동 OFF]")
+            return
+
+        # running 또는 preheating 상태가 5분 이상 지속됨
+        if elapsed >= OFF_IDLE_WAIT_TIMEOUT_SEC:
+            self._force_relay_off(
+                "[자동 OFF]",
+                f"ALD {state} 상태가 5분 이상 지속됨",
+            )
             return
 
     # ============ 스케줄 체크 ============

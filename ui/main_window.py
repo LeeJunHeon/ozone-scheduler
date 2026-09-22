@@ -58,6 +58,7 @@ class StatusPill(QLabel):
         super().__init__(text, parent)
         self.setMinimumHeight(22)
         self._set_style(kind)
+        self._last_logged_ald_status: tuple | None = None
 
     def _set_style(self, kind: str) -> None:
         # kind: 'neutral' | 'success' | 'warn' | 'error'
@@ -543,7 +544,7 @@ class MainWindow(QMainWindow):
     def _on_chat_url_changed(self) -> None:
         self.config.chat_webhook_url = self.chat_url_edit.text().strip()
         self.config.save()
-        self._on_log("info", "Google Chat URL 설정 저장 완료")
+        self._record_ui_log("info", "Google Chat URL 설정 저장 완료")
 
     def _refresh_ports(self, select: str = "") -> None:
         ports = list_serial_ports()
@@ -652,10 +653,10 @@ class MainWindow(QMainWindow):
         if self._recipe_scan_in_progress:
             elapsed = time.time() - self._recipe_scan_started_at
             if elapsed <= RECIPE_SCAN_TIMEOUT_SEC:
-                self._on_log("info", "레시피 폴더 스캔이 이미 진행 중")
+                self._record_ui_log("info", "레시피 폴더 스캔이 이미 진행 중")
                 return
 
-            self._on_log(
+            self._record_ui_log(
                 "warn",
                 f"이전 레시피 폴더 스캔이 {RECIPE_SCAN_TIMEOUT_SEC}초 이상 응답 없음 → 새 스캔 허용",
             )
@@ -663,7 +664,7 @@ class MainWindow(QMainWindow):
 
         rdir = self.config.recipe_dir or ""
         if not rdir:
-            self._on_log("warn", "레시피 폴더가 설정되지 않음")
+            self._record_ui_log("warn", "레시피 폴더가 설정되지 않음")
             return
 
         self._recipe_scan_in_progress = True
@@ -698,14 +699,14 @@ class MainWindow(QMainWindow):
 
         self._recipe_scan_in_progress = False
         if error is not None:
-            self._on_log("warn", f"폴더 스캔 실패: {error}")
+            self._record_ui_log("warn", f"폴더 스캔 실패: {error}")
             return
 
         names = names or []
         for r in (self.rcp_on, self.rcp_pre, self.rcp_post):
             r.set_names(names)
 
-        self._on_log("info", f"레시피 {len(names)}개 발견")
+        self._record_ui_log("info", f"레시피 {len(names)}개 발견")
 
     # ============ ALD 상태 폴링 (UI 5초마다) ============
 
@@ -768,14 +769,14 @@ class MainWindow(QMainWindow):
             self.conn_pill.set("연결 안 됨", "error")
             self.ald_pill.set("ALD 상태: 확인 불가", "neutral")
             self.alarm_pill.set("알람: 확인 불가", "neutral")
-            self._on_log("warn", f"Rayvac TCP 연결 실패: {error}")
+            self._record_ui_log("warn", f"Rayvac TCP 연결 실패: {error}")
             return
 
         if not isinstance(status, dict):
             self.conn_pill.set("응답 오류", "error")
             self.ald_pill.set("ALD 상태: 응답 오류", "error")
             self.alarm_pill.set("알람: 확인 불가", "neutral")
-            self._on_log(
+            self._record_ui_log(
                 "error",
                 f"ALD 상태 응답 타입 오류: {type(status).__name__}",
             )
@@ -788,10 +789,15 @@ class MainWindow(QMainWindow):
         alarm = bool(status.get("alarm", False))
         message = str(status.get("message", "") or "")
 
-        self._on_log(
-            "info",
-            f"Rayvac 상태 확인: state={state}, alarm={alarm}, message={message}",
-        )
+        status_key = (state, alarm, message)
+
+        if status_key != self._last_logged_ald_status:
+            self._record_ui_log(
+                "info",
+                f"Rayvac 상태 변경: "
+                f"state={state}, alarm={alarm}, message={message}",
+            )
+            self._last_logged_ald_status = status_key
 
         if state == "idle":
             self.ald_pill.set("ALD 상태: idle", "success")
@@ -918,7 +924,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         logger.info("MainWindow closeEvent called")
-        self._on_log("info", "프로그램 창 닫힘 요청 감지")
+        self._record_ui_log("info", "프로그램 창 닫힘 요청 감지")
         self.config.save()
         super().closeEvent(event)
 
