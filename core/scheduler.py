@@ -102,7 +102,7 @@ class OzoneController(QObject):
                 self._tick()
             except Exception as e:
                 logger.exception("scheduler tick 예외")
-                self.log.emit("error", f"tick 예외: {e}")
+                self._emit_log("error", f"tick 예외: {e}")
                 self._recover_from_unexpected_exception(e)
             time.sleep(1.0)
 
@@ -116,7 +116,7 @@ class OzoneController(QObject):
         if st == SeqState.IDLE:
             return
 
-        self.log.emit(
+        self._emit_log(
             "error",
             f"예상 밖 예외로 {st.value} 상태에서 복구 진입: {exc}",
         )
@@ -127,6 +127,7 @@ class OzoneController(QObject):
             if st in {
                 SeqState.ON_RUNNING,
                 SeqState.ON_RECIPE_RUNNING,
+                SeqState.OFF_WAIT_IDLE,
                 SeqState.OFF_PRE_RUNNING,
                 SeqState.OFF_POST_RUNNING,
             } or self.relay_on:
@@ -180,7 +181,7 @@ class OzoneController(QObject):
         logger.log(log_level, text)
 
         # UI 표시는 부가 기능
-        self.log.emit(level, text)
+        self._emit_log(level, text)
 
     @staticmethod
     def _ald_status_reason(status: dict) -> str:
@@ -210,7 +211,7 @@ class OzoneController(QObject):
             f"사유: {reason}\n"
             f"이번 예약에서는 릴레이 {action} 명령을 전송하지 않았습니다."
         )
-        self.log.emit("warn", text)
+        self._emit_log("warn", text)
         self._notify_chat(text)
 
     # ============ 상태 전이 ============
@@ -253,38 +254,22 @@ class OzoneController(QObject):
         self._next_off_status_poll_at = (
             now + OFF_IDLE_POLL_INTERVAL_SEC
         )
+        elapsed = now - self._off_wait_started
 
         try:
             status = self._ald().get_status()
         except AldClientError as e:
             self._emit_log(
                 "warn",
-                f"[자동 OFF] ALD 상태 조회 실패, 재시도 예정: {e}",
+                f"[자동 OFF] ALD 상태 조회 실패: {e}",
             )
+
+            if elapsed >= OFF_IDLE_WAIT_TIMEOUT_SEC:
+                self._force_relay_off(
+                    "[자동 OFF]",
+                    "ALD 상태를 5분 동안 확인하지 못함",
+                )
             return
-
-        if status["alarm"] or status["state"] == "error":
-            self._force_relay_off(
-                "[자동 OFF]",
-                self._ald_status_reason(status),
-            )
-            return
-
-        if status["state"] == "idle":
-            self._emit_log(
-                "info",
-                "[자동 OFF] ALD idle 확인 → 자동 OFF 진행",
-            )
-            self._do_pre_off_recipe("[자동 OFF]")
-            return
-
-        elapsed = now - self._off_wait_started
-
-        if elapsed >= OFF_IDLE_WAIT_TIMEOUT_SEC:
-            self._force_relay_off(
-                "[자동 OFF]",
-                "ALD running 상태가 5분 이상 지속됨",
-            )
 
     # ============ 스케줄 체크 ============
 
@@ -360,10 +345,18 @@ class OzoneController(QObject):
     def manual_off(self) -> None:
         with self._lock:
             if self._state != SeqState.IDLE:
-                self.log.emit("warn", "다른 시퀀스 진행 중. 수동 OFF 거부")
+                self._emit_log(
+                    "warn",
+                    "다른 시퀀스 진행 중. 수동 OFF 거부",
+                )
                 return
 
-        self.log.emit("info", "[수동 OFF] 요청 접수")
+            self._state = SeqState.ON_RUNNING
+
+        self.state_changed.emit(SeqState.ON_RUNNING.value)
+        self._current_is_auto = False
+        self._emit_log("info", "[수동 OFF] 요청 접수")
+
         threading.Thread(
             target=self._manual_off_direct,
             name="ManualRelayOff",
@@ -382,7 +375,7 @@ class OzoneController(QObject):
             self.relay_state_changed.emit(True)
             self._emit_log("info", f"{tag} 릴레이 ON OK")
         except RelayError as e:
-            self.log.emit("error", f"{tag} 릴레이 ON 실패: {e}")
+            self._emit_log("error", f"{tag} 릴레이 ON 실패: {e}")
         finally:
             self._set_state(SeqState.IDLE)
 
@@ -395,9 +388,9 @@ class OzoneController(QObject):
             self._relay().off()
             self.relay_on = False
             self.relay_state_changed.emit(False)
-            self.log.emit("info", f"{tag} 릴레이 OFF OK")
+            self._emit_log("info", f"{tag} 릴레이 OFF OK")
         except RelayError as e:
-            self.log.emit("error", f"{tag} 릴레이 OFF 실패: {e}")
+            self._emit_log("error", f"{tag} 릴레이 OFF 실패: {e}")
         finally:
             self._set_state(SeqState.IDLE)
 
@@ -430,14 +423,14 @@ class OzoneController(QObject):
             self.relay_state_changed.emit(True)
             self._emit_log("info", f"{tag} 릴레이 ON OK")
         except RelayError as e:
-            self.log.emit("error", f"{tag} 릴레이 ON 실패: {e}")
+            self._emit_log("error", f"{tag} 릴레이 ON 실패: {e}")
             self._notify_chat(f"{tag} 실패: 릴레이 ON 실패 ({e})")
             self._set_state(SeqState.IDLE)
             return
 
         # ① ON 직후 레시피가 없으면 여기서 자동 ON 완료
         if not self.config.recipe_on:
-            self.log.emit("info", f"{tag} ① 레시피 사용 안 함")
+            self._emit_log("info", f"{tag} ① 레시피 사용 안 함")
             self._notify_chat(
                 f"{tag} 릴레이 ON 명령 전송 완료. ① 레시피 사용 안 함"
             )
@@ -449,7 +442,7 @@ class OzoneController(QObject):
         try:
             result = self._ald().start_recipe(csv_path)
         except AldClientError as e:
-            self.log.emit("error", f"{tag} ① START_ALD 실패: {e}")
+            self._emit_log("error", f"{tag} ① START_ALD 실패: {e}")
             self._notify_chat(f"{tag} 실패: ① START_ALD 실패 ({e})")
             self._safe_relay_off_after_on_failure(tag)
             self._set_state(SeqState.IDLE)
@@ -457,13 +450,13 @@ class OzoneController(QObject):
 
         if result.get("result") != "success":
             msg = result.get("message")
-            self.log.emit("error", f"{tag} ① 레시피 시작 실패: {msg}")
+            self._emit_log("error", f"{tag} ① 레시피 시작 실패: {msg}")
             self._notify_chat(f"{tag} 실패: ① 레시피 시작 실패 ({msg})")
             self._safe_relay_off_after_on_failure(tag)
             self._set_state(SeqState.IDLE)
             return
 
-        self.log.emit("info", f"{tag} ① 레시피 시작 OK ({self.config.recipe_on}) → 완료 대기")
+        self._emit_log("info", f"{tag} ① 레시피 시작 OK ({self.config.recipe_on}) → 완료 대기")
         self._notify_chat(f"{tag} ① 레시피 시작: {self.config.recipe_on}")
 
         self._begin_recipe_wait(SeqState.ON_RECIPE_RUNNING)
@@ -474,34 +467,18 @@ class OzoneController(QObject):
     # ============ OFF 시퀀스 (3단계, 비동기) ============
 
     def _start_off_sequence(self) -> None:
-        tag = "[자동 OFF]"
         self._current_is_auto = True
-
         self._off_wait_started = time.monotonic()
         self._next_off_status_poll_at = 0.0
         self._set_state(SeqState.OFF_WAIT_IDLE)
 
-        self._tick_off_wait_idle()
+        self._emit_log(
+            "info",
+            "[자동 OFF] ALD idle 대기 시작",
+        )
 
-        # 자동 OFF 시작 전 ALD 상태 확인
-        try:
-            status = self._ald().get_status()
-        except AldClientError as e:
-            self._notify_schedule_skipped(
-                tag, "OFF", f"ALD 상태 조회 실패\n상세: {e}"
-            )
-            self._set_state(SeqState.IDLE)
-            return
-
-        if status["state"] != "idle" or status["alarm"]:
-            self._notify_schedule_skipped(
-                tag, "OFF", self._ald_status_reason(status)
-            )
-            self._set_state(SeqState.IDLE)
-            return
-
-        self.log.emit("info", f"{tag} ALD idle 확인 → 자동 OFF 진행")
-        self._do_pre_off_recipe(tag)
+        # 다음 scheduler tick에서 상태를 확인하게 둔다.
+        # 여기서 직접 _tick_off_wait_idle()을 호출하지 않아도 됨.
 
     def _send_relay_off_with_retry(
         self,
@@ -521,14 +498,14 @@ class OzoneController(QObject):
                 self._relay().off()
                 self.relay_on = False
                 self.relay_state_changed.emit(False)
-                self.log.emit(
+                self._emit_log(
                     "info", f"{tag} 릴레이 OFF 명령 전송 완료{suffix}"
                 )
                 return True
             except RelayError as e:
                 last_error = e
                 level = "error" if attempt == attempts else "warn"
-                self.log.emit(
+                self._emit_log(
                     level,
                     f"{tag} 릴레이 OFF 실패 {attempt}/{attempts}{suffix}: {e}",
                 )
@@ -546,9 +523,9 @@ class OzoneController(QObject):
     def _safe_relay_off_after_on_failure(self, tag: str) -> None:
         """ON 후 ① 레시피 시작 실패 시 오존 릴레이가 켜진 채 남지 않도록 OFF 시도."""
         if self.relay_on:
-            self.log.emit("warn", f"{tag} ① 레시피 시작 실패 → 안전상 릴레이 OFF 시도")
+            self._emit_log("warn", f"{tag} ① 레시피 시작 실패 → 안전상 릴레이 OFF 시도")
         else:
-            self.log.emit(
+            self._emit_log(
                 "warn",
                 f"{tag} ① 레시피 시작 실패 → relay_on 추정값은 OFF, 그래도 OFF 명령 시도",
             )
@@ -571,7 +548,7 @@ class OzoneController(QObject):
             f"{tag} 후속 레시피를 실행하지 않고 릴레이 OFF를 시도합니다.\n"
             f"사유: {reason}"
         )
-        self.log.emit("warn", text)
+        self._emit_log("warn", text)
         self._notify_chat(text)
 
         sent = self._send_relay_off_with_retry(
@@ -593,7 +570,7 @@ class OzoneController(QObject):
         """자동 OFF의 ② OFF 직전 레시피 실행. 없으면 바로 릴레이 OFF."""
 
         if not self.config.recipe_pre_off:
-            self.log.emit("info", f"{tag} ② 직전 레시피 사용 안 함 → 릴레이 OFF 진행")
+            self._emit_log("info", f"{tag} ② 직전 레시피 사용 안 함 → 릴레이 OFF 진행")
             self._do_relay_off(tag)
             return
 
@@ -614,7 +591,7 @@ class OzoneController(QObject):
             )
             return
 
-        self.log.emit("info", f"{tag} ② 직전 레시피 시작 → 완료 대기")
+        self._emit_log("info", f"{tag} ② 직전 레시피 시작 → 완료 대기")
         self._notify_chat(f"{tag} ② 직전 레시피 시작: {self.config.recipe_pre_off}")
 
         self._begin_recipe_wait(SeqState.OFF_PRE_RUNNING)
@@ -633,7 +610,7 @@ class OzoneController(QObject):
             return
 
         if not self.config.recipe_post_off:
-            self.log.emit("info", f"{tag} ③ 직후 레시피 사용 안 함")
+            self._emit_log("info", f"{tag} ③ 직후 레시피 사용 안 함")
             self._notify_chat(
                 f"{tag} 릴레이 OFF 명령 전송 완료. ③ 레시피 사용 안 함"
             )
@@ -648,7 +625,7 @@ class OzoneController(QObject):
                 f"③ 직후 레시피는 시작하지 않았습니다.\n"
                 f"사유: ALD 상태 조회 실패\n상세: {e}"
             )
-            self.log.emit("error", text)
+            self._emit_log("error", text)
             self._notify_chat(text)
             self._set_state(SeqState.IDLE)
             return
@@ -659,7 +636,7 @@ class OzoneController(QObject):
                 f"③ 직후 레시피는 시작하지 않았습니다.\n"
                 f"사유: {self._ald_status_reason(status)}"
             )
-            self.log.emit("warn", text)
+            self._emit_log("warn", text)
             self._notify_chat(text)
             self._set_state(SeqState.IDLE)
             return
@@ -672,19 +649,19 @@ class OzoneController(QObject):
                 f"{tag} 릴레이 OFF 명령은 전송했습니다.\n"
                 f"③ 시작 요청 결과를 확인하지 못했습니다.\n상세: {e}"
             )
-            self.log.emit("error", text)
+            self._emit_log("error", text)
             self._notify_chat(text)
             self._set_state(SeqState.IDLE)
             return
 
         if result.get("result") != "success":
             msg = result.get("message")
-            self.log.emit("error", f"{tag} ③ 레시피 시작 실패: {msg}")
+            self._emit_log("error", f"{tag} ③ 레시피 시작 실패: {msg}")
             self._notify_chat(f"{tag} 실패: ③ 레시피 시작 실패 ({msg})")
             self._set_state(SeqState.IDLE)
             return
 
-        self.log.emit("info", f"{tag} ③ 직후 레시피 시작 → 완료 대기")
+        self._emit_log("info", f"{tag} ③ 직후 레시피 시작 → 완료 대기")
         self._notify_chat(f"{tag} ③ 직후 레시피 시작: {self.config.recipe_post_off}")
 
         self._begin_recipe_wait(SeqState.OFF_POST_RUNNING)
@@ -712,7 +689,7 @@ class OzoneController(QObject):
             f"사유: {reason}\n"
             "이 처리에서는 추가 릴레이 명령을 전송하지 않았습니다."
         )
-        self.log.emit("error", text)
+        self._emit_log("error", text)
         self._notify_chat(text)
         self._set_state(SeqState.IDLE)
 
@@ -733,7 +710,7 @@ class OzoneController(QObject):
         try:
             status = self._ald().get_status()
         except AldClientError as e:
-            self.log.emit(
+            self._emit_log(
                 "warn", f"{tag} {stage} ALD 상태 조회 실패: {e}"
             )
 
@@ -758,7 +735,7 @@ class OzoneController(QObject):
 
         if state == "running":
             if not self._recipe_seen_running:
-                self.log.emit(
+                self._emit_log(
                     "info", f"{tag} {stage} ALD running 상태 관측"
                 )
             self._recipe_seen_running = True
@@ -782,7 +759,7 @@ class OzoneController(QObject):
             f"{tag} {stage} ALD 실행 상태 관측 후 대기 상태 복귀를 확인했습니다.\n"
             "레시피의 성공 여부는 현재 상태 응답만으로 확인할 수 없습니다."
         )
-        self.log.emit("info", text)
+        self._emit_log("info", text)
         self._notify_chat(text)
 
         if stage == "②":

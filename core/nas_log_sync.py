@@ -68,15 +68,22 @@ class NasLogSyncWorker:
             self._stop_event.wait(self.interval_sec)
 
     def _sync_once(self) -> None:
-        computer_name = socket.gethostname()
-        destination_dir = self.nas_root / computer_name
+        destination_dir = self.nas_root
         destination_dir.mkdir(parents=True, exist_ok=True)
 
         files = list(self.local_dir.glob("ozone_*.log"))
         files += list(self.local_dir.glob("crash_*.log"))
 
         for source in files:
+            stat = source.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+            key = str(source)
+
+            if self._synced_signatures.get(key) == signature:
+                continue
+
             self._upload_snapshot(source, destination_dir)
+            self._synced_signatures[key] = signature
 
     def _upload_snapshot(
         self,

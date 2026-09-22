@@ -537,9 +537,8 @@ class MainWindow(QMainWindow):
         self.ald_pill.set("ALD: 확인 중", "neutral")
         self.alarm_pill.set("알람: 확인 중", "neutral")
 
-        # 포트 숫자를 연속으로 바꿀 때 매번 TCP 연결하지 않도록
-        # 마지막 변경 후 500ms 뒤 딱 한 번 테스트
-        self._ald_test_timer.start(500)
+        # 마지막 변경 후 500ms 뒤 한 번 추가 확인
+        QTimer.singleShot(500, self._test_ald_connection)
 
     def _on_chat_url_changed(self) -> None:
         self.config.chat_webhook_url = self.chat_url_edit.text().strip()
@@ -815,6 +814,16 @@ class MainWindow(QMainWindow):
             self.alarm_pill.set("알람 발생", "error")
         else:
             self.alarm_pill.set("알람 정상", "success")
+
+    def _record_ui_log(self, level: str, text: str) -> None:
+        log_level = {
+            "info": logging.INFO,
+            "warn": logging.WARNING,
+            "error": logging.ERROR,
+        }.get(level, logging.INFO)
+
+        logger.log(log_level, text)
+        self._on_log(level, text)
 
     # ============ 다음 실행 라벨 ============
     def _format_qtime_ampm(self, t: QTime) -> str:

@@ -44,7 +44,7 @@ class AppConfig:
 
     nas_log_enabled: bool = True
     nas_log_dir: str = (
-        r"\\VanaM_NAS\VanaM_toShare\JH_Lee\Logs\ozone"
+        r"\\VanaM_NAS\VanaM_toShare\JH_Lee\Logs\ozone_scheduler"
     )
     nas_log_sync_interval_sec: int = 30
     local_log_retention_days: int = 14
